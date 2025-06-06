@@ -1,0 +1,117 @@
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Project Overview
+
+This project involves classifying vole species (*multiplex* vs *subterraneus*) using skull measurements. The analysis includes data cleaning, visualization, logistic regression modeling, bootstrapping to validate model assumptions, and cross-validation for model selection.
+
+## Data Preparation
+
+```{r}
+library(readxl)
+library(dplyr)
+file_path <- "Vole Skulls.xlsm"
+data_unknown <- read_excel(file_path, sheet = 1)
+subterraneus <- read_excel(file_path, sheet = 2) %>% filter(complete.cases(.))
+multiplex <- read_excel(file_path, sheet = 3) %>% filter(complete.cases(.))
+multiplex <- unique(multiplex)
+data_known <- rbind(subterraneus, multiplex)
+data_known$chromosomal_id <- as.factor(data_known$chromosomal_id)
+```
+
+## Data Cleaning
+
+```{r}
+# Replace specific outliers with column medians
+sub <- subterraneus
+sub$skull_width = ifelse(sub$index == 2, median(sub$skull_width), sub$skull_width)
+sub$skull_length = ifelse(sub$index == 13, median(sub$skull_length), sub$skull_length)
+sub$skull_height = ifelse(sub$index == 33, median(sub$skull_height), sub$skull_height)
+
+multi <- multiplex
+multi$skull_height = ifelse(multi$index == 8, median(multi$skull_height), multi$skull_height)
+multi$skull_length = ifelse(multi$index == 39, median(multi$skull_length), multi$skull_length)
+
+df_known <- rbind(sub, multi)
+```
+
+## Exploratory Data Analysis
+
+```{r}
+library(ggplot2)
+library(GGally)
+ggpairs(df_known, columns = c("skull_length", "skull_height", "skull_width"), mapping = aes(color = chromosomal_id)) +
+  theme_bw()
+```
+
+## Logistic Regression Modeling
+
+```{r}
+model <- glm(chromosomal_id ~ skull_height + skull_width, data = df_known, family = binomial)
+summary(model)
+```
+
+## Bootstrapping Deviance
+
+```{r}
+library(data.table)
+df <- subset(df_known, chromosomal_id != "unknown")
+df$chromosomal_id <- as.factor(df$chromosomal_id)
+setDT(df, keep.rownames = TRUE)[]
+
+dfM <- subset(df, chromosomal_id == "multiplex")
+dfS <- subset(df, chromosomal_id == "subterraneus")
+fm <- chromosomal_id ~ skull_height + skull_width
+
+storer <- NULL
+for (i in 1:1000) {
+  sampM <- dfM[sample(nrow(dfM), replace = TRUE), ]
+  sampS <- dfS[sample(nrow(dfS), replace = TRUE), ]
+  samp <- rbind(sampM, sampS)
+  m <- glm(fm, data = samp, family = binomial)
+  storer <- c(storer, summary(m)$deviance)
+}
+
+quantile(storer, c(0.025, 0.975))
+```
+
+## Model Comparison with Cross-Validation
+
+```{r}
+library(boot)
+m1 <- glm(chromosomal_id ~ skull_length + skull_height + skull_width, data = df_known, family = binomial)
+m2 <- glm(chromosomal_id ~ skull_height, data = df_known, family = binomial)
+m3 <- glm(chromosomal_id ~ skull_width, data = df_known, family = binomial)
+m4 <- glm(chromosomal_id ~ skull_length, data = df_known, family = binomial)
+m5 <- glm(chromosomal_id ~ skull_length + skull_height, data = df_known, family = binomial)
+m6 <- glm(chromosomal_id ~ skull_length + skull_width, data = df_known, family = binomial)
+m7 <- glm(chromosomal_id ~ skull_height + skull_width, data = df_known, family = binomial)
+
+cv_errors <- c(
+  cv.glm(df_known, m1)$delta[2],
+  cv.glm(df_known, m2)$delta[2],
+  cv.glm(df_known, m3)$delta[2],
+  cv.glm(df_known, m4)$delta[2],
+  cv.glm(df_known, m5)$delta[2],
+  cv.glm(df_known, m6)$delta[2],
+  cv.glm(df_known, m7)$delta[2]
+)
+
+model_names <- c("LHW", "H", "W", "L", "LH", "LW", "HW")
+model_summary <- data.frame(Model = model_names, Error = cv_errors)
+model_summary[order(model_summary$Error), ]
+```
+
+## Confusion Matrix and Accuracy
+
+```{r}
+best_model <- m7  # Assuming "HW" was best
+predicted <- ifelse(predict(best_model, df_known, type = "response") > 0.5, "subterraneus", "multiplex")
+predicted <- factor(predicted, levels = c("multiplex", "subterraneus"))
+actual <- df_known$chromosomal_id
+conf_matrix <- table(Predicted = predicted, Actual = actual)
+conf_matrix
+sum(diag(conf_matrix)) / sum(conf_matrix)  # Accuracy
+```
