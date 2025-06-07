@@ -1,0 +1,78 @@
+# Load required libraries
+library(dplyr)
+library(bnlearn)
+library(Rgraphviz)
+
+# Set working directory and load data
+Path <- "C:/Users/HP/Downloads/STAT_600/FINAL PROJECT"
+FileNames <- c("A 2017 Soybeans Harvest.csv", "A 2018 Corn Seeding.csv", 
+               "A 2018 Corn Harvest.csv", "A 2019 Soybeans Harvest.csv", 
+               "A 2020 Corn Seeding.csv", "A 2020 Corn Harvest.csv")
+Data <- lapply(paste(Path, FileNames, sep = "/"), read.csv, header = TRUE)
+DataNames <- c("Soybeans Harvest.2017", "Corn Seeding.2018", "Corn Harvest.2018", 
+               "Soybeans Harvest.2019", "Corn Seeding.2020", "Corn Harvest.2020")
+Data <- setNames(Data, DataNames)
+
+# Aggregate and normalize data
+data_type <- ifelse(grepl("Soybeans Harvest", FileNames), "Soybeans Harvest",
+              ifelse(grepl("Corn Harvest", FileNames), "Corn Harvest", "Corn Seeding"))
+
+aggregated_data <- vector("list", length(Data))
+normalized_data <- vector("list", length(Data))
+
+data_cols <- list(Yield = c("Harvest"), AppliedRate = c("Seeding"))
+
+for (i in seq_along(Data)) {
+  df <- Data[[i]]
+  df$Row <- ceiling(df$Latitude / 50)
+  df$Column <- ceiling(df$Longitude / 50)
+  df$Cell <- df$Row * 1000 + df$Column
+
+  if (grepl("Harvest", DataNames[i])) {
+    aggregated <- aggregate(Yield ~ Cell, data = df, FUN = function(x)
+      c(mean = mean(x, na.rm = TRUE), count = length(x)))
+  } else {
+    aggregated <- aggregate(AppliedRate ~ Cell, data = df, FUN = function(x)
+      c(mean = mean(x, na.rm = TRUE), count = length(x)))
+  }
+  aggregated_data[[i]] <- aggregated
+
+  # Normalization (rank-based)
+  if (data_type[i] %in% c("Soybeans Harvest", "Corn Harvest")) {
+    df$Yield <- rank(df$Yield)
+  } else {
+    df$AppliedRate <- rank(df$AppliedRate)
+  }
+  normalized_data[[i]] <- df
+}
+
+# Filter and merge
+filtered_data <- lapply(aggregated_data, function(df) {
+  if ("Yield" %in% names(df)) {
+    subset(df, Yield[,"count"] >= 30)
+  } else {
+    subset(df, AppliedRate[,"count"] >= 30)
+  }
+})
+
+merged_data <- Reduce(function(x, y) merge(x, y, by = "Cell"), filtered_data)
+names(merged_data) <- c("Cell", "Y17", "AR18", "Y18", "Y19", "AR20", "Y20")
+CombinedData <- data.frame(
+  Cell = merged_data$Cell,
+  Y17 = merged_data$Y17[,"mean"],
+  AR18 = merged_data$AR18[,"mean"],
+  Y18 = merged_data$Y18[,"mean"],
+  Y19 = merged_data$Y19[,"mean"],
+  AR20 = merged_data$AR20[,"mean"],
+  Y20 = merged_data$Y20[,"mean"]
+)
+
+# Causal modeling with Bayesian networks
+model1 <- model2network("[Y17][AR18|Y17][Y18|AR18:Y17][Y19|Y17:AR18:Y18][AR20|Y19][Y20|AR20:Y19]")
+fit_model <- bn.fit(model1, CombinedData[, -1])
+strengths <- arc.strength(model1, CombinedData[, -1])
+strength.plot(model1, strengths)
+
+# Optional: View combined data
+head(CombinedData)
+pairs(CombinedData)
