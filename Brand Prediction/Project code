@@ -1,0 +1,171 @@
+## Overview
+
+This project explores brand classification of particles using image-derived shape and size features. The approach combines clustering (via Gaussian Mixture Models), brand center comparisons (using Euclidean distance), and supervised classification models including:
+
+-   **Random Forests** (for robust classification with downsampled training sets)
+-   **Linear Discriminant Analysis (LDA)** (with and without cross-validation)
+-   **k-Nearest Neighbors (kNN)** (to explore local brand similarity)
+
+We evaluate multiple downsampling strategies to create balanced training data and assess classification performance using confidence intervals from binomial testing.
+
+## Setup
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+library(dplyr)
+library(mclust)
+library(cluster)
+library(proxy)
+library(ggplot2)
+library(caret)
+library(ranger)
+library(MASS)
+library(class)
+library(FNN)
+```
+
+## 1. Data Import and Preprocessing
+
+```{r}
+query_1 <- read.csv("query_1.csv")
+query_2 <- read.csv("query_2.csv")
+query_6 <- read.csv("query_6.csv")
+unexploded_watchlist <- read.csv("unexploded_watchlist.csv")
+background_data <- read.csv("background_data.csv")
+```
+
+## 2. Clustering with Mclust
+
+```{r}
+model_query_1 <- Mclust(scale(query_1), G = 5)
+model_query_2 <- Mclust(scale(query_2), G = 5)
+model_query_6 <- Mclust(scale(query_6), G = 5)
+query_1$cluster <- model_query_1$classification
+query_2$cluster <- model_query_2$classification
+query_6$cluster <- model_query_6$classification
+```
+
+## 3. Cluster-to-Brand Distance (Watchlist vs Background)
+
+```{r}
+# Calculate cluster centers for each query and brand centers from unexploded_watchlist
+cluster_centers <- aggregate(query_1[, c("Area", "Perim.", "Major", "Minor")],
+                             by = list(cluster = model_query_1$classification),
+                             FUN = mean)
+
+brand_centers <- aggregate(unexploded_watchlist[, c("Area", "Perim.", "Major", "Minor")],
+                           by = list(Brand = unexploded_watchlist$Brand),
+                           FUN = mean)
+
+# Compute Euclidean distance matrix between cluster centers and brand centers
+dist_matrix <- proxy::dist(as.matrix(cluster_centers[, -1]), 
+                           as.matrix(brand_centers[, -1]), 
+                           method = "Euclidean")
+
+rownames(dist_matrix) <- paste0("Cluster_", cluster_centers$cluster)
+colnames(dist_matrix) <- brand_centers$Brand
+
+# Assign closest brand to each cluster
+closest_brands <- apply(dist_matrix, 1, function(x) colnames(dist_matrix)[which.min(x)])
+cluster_brand_mapping <- data.frame(
+  Cluster = rownames(dist_matrix),
+  Closest_Brand = closest_brands,
+  Min_Distance = apply(dist_matrix, 1, min)
+)
+
+# Show mapping result
+print(cluster_brand_mapping)
+```
+
+## 4. Downsampling Methods for Training Data
+
+To build a balanced training set for classification, we used two different strategies to downsample the background data. Both were designed to reflect realistic sample variability and maintain parity with the watchlist data.
+
+```{r}
+### Method 1: Random Sampling Across Entire Background
+
+#Randomly selected particles across all background brands to simulate a generalized “non-watchlist” class.
+
+
+# Determine average particles per sample from the watchlist
+particles_per_sample <- unexploded_watchlist %>%
+  group_by(Brand, Sample) %>%
+  summarise(n = n(), .groups = 'drop')
+
+avg_n_particles <- round(mean(particles_per_sample$n))
+
+# Randomly sample background particles and label them as "NonWatchlist"
+bg_random <- slice(background_data, 0)
+
+for (i in 1:5) {
+  sample_i <- sample_n(background_data, avg_n_particles)
+  sample_i$Sample <- paste0("Sample", i)
+  bg_random <- bind_rows(bg_random, sample_i)
+}
+bg_random$Brand <- "NonWatchlist"
+
+# Aggregate by Sample
+bg_agg_random <- bg_random %>%
+  group_by(Brand, Sample) %>%
+  summarise(across(c("Area", "Perim.", "Major", "Minor"), mean), .groups = 'drop')
+
+
+# Method 2: Cluster-Informed Background Filtering
+#This method filters the background dataset to include only those brands that were found to be most similar (by distance) to clusters in the query sets. This helps focus classification on likely confounders.
+
+# Collect all top-5 closest background brands from cluster analysis
+selected_brands <- unique(unlist(c(
+  closest_brands_df[, grep("Closest_Brand", names(closest_brands_df))],
+  closest_brands_df2[, grep("Closest_Brand", names(closest_brands_df2))],
+  closest_brands_df6[, grep("Closest_Brand", names(closest_brands_df6))]
+)))
+
+# Filter background data by selected brands and relabel
+bg_filtered <- background_data %>%
+  filter(Brand %in% selected_brands) %>%
+  mutate(Brand = "NonWatchlist")
+
+# Aggregate by Sample
+bg_agg_filtered <- bg_filtered %>%
+  group_by(Brand, Sample) %>%
+  summarise(across(c("Area", "Perim.", "Major", "Minor"), mean), .groups = 'drop')
+
+```
+
+## 5. Preprocessing
+
+```{r}
+# Preprocess (scale and center)
+preProc <- preProcess(train_data %>% dplyr::select(all_of(common_features)), method = c("center", "scale"))
+train_scaled <- predict(preProc, train_data %>% dplyr::select(all_of(common_features)))
+train_scaled$Brand <- train_data$Brand
+```
+
+## 6. Random Forest Classification
+
+```{r}
+# Train a random forest model using watchlist and filtered background data
+rf_model <- train(
+  Brand ~ ., data = train_scaled,
+  method = "ranger",
+  trControl = trainControl(method = "cv", number = 5, savePredictions = "final"),
+  tuneLength = 3, importance = 'impurity')
+```
+
+## 7. Query Predictions
+
+```{r}
+predict_q1 <- predict(rf_model, predict(preProc, query_1[,1:4]))
+predict_q2 <- predict(rf_model, predict(preProc, query_2[,1:4]))
+predict_q6 <- predict(rf_model, predict(preProc, query_6[,1:4]))
+```
+
+## 8. Linear Discriminant Analysis (LDA)
+
+```{r}
+lda_model <- lda(Brand ~ ., data = model.dat, CV = TRUE)
+acc <- mean(lda_model$class == model.dat$Brand)
+cat("LDA Accuracy:", acc)
+```
+
+
